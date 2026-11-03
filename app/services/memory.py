@@ -1,5 +1,10 @@
 """Long-term memory service using mem0 and pgvector with optional cache layer."""
 
+from typing import (
+    Any,
+    Dict,
+)
+
 from langchain_core.messages import BaseMessage
 from mem0 import AsyncMemory
 
@@ -10,7 +15,54 @@ from app.core.cache import (
 from app.core.config import settings
 from app.core.logging import logger
 from app.core.prompts import load_memory_capture_prompt
+from app.services.llm import LLMRegistry
 from app.utils import latest_user_text
+
+
+def build_mem0_config() -> Dict[str, Any]:
+    """Return the mem0 config: pgvector storage, Gemini for fact extraction and embeddings."""
+    return {
+        "vector_store": {
+            "provider": "pgvector",
+            "config": {
+                "collection_name": settings.LONG_TERM_MEMORY_COLLECTION_NAME,
+                "dbname": settings.POSTGRES_DB,
+                "user": settings.POSTGRES_USER,
+                "password": settings.POSTGRES_PASSWORD,
+                "host": settings.POSTGRES_HOST,
+                "port": settings.POSTGRES_PORT,
+                "embedding_model_dims": settings.LONG_TERM_MEMORY_EMBEDDING_DIMS,
+            },
+        },
+        # mem0's "openai" LLM provider always sends OpenAI's `store` field, which Gemini rejects
+        # with a 400. The "langchain" provider takes a model instance instead, so mem0 reuses the
+        # registry entry (endpoint, key, timeout). It ignores mem0's response_format, so JSON mode
+        # is set on the model itself — mem0 expects JSON from every call it makes.
+        "llm": {
+            "provider": "langchain",
+            "config": {
+                "model": LLMRegistry.get(
+                    settings.LONG_TERM_MEMORY_MODEL,
+                    temperature=0.1,
+                    # mem0's own default; the update step returns JSON covering every related memory.
+                    max_completion_tokens=2000,
+                    model_kwargs={"response_format": {"type": "json_object"}},
+                ),
+            },
+        },
+        # The OpenAI embedder sends only input/model/dimensions, which Gemini accepts. Without an
+        # explicit key and base_url it would read OPENAI_API_KEY / OPENAI_BASE_URL.
+        "embedder": {
+            "provider": "openai",
+            "config": {
+                "model": settings.LONG_TERM_MEMORY_EMBEDDER_MODEL,
+                "api_key": settings.GEMINI_API_KEY,
+                "openai_base_url": settings.GEMINI_BASE_URL,
+                "embedding_dims": settings.LONG_TERM_MEMORY_EMBEDDING_DIMS,
+            },
+        },
+        "custom_fact_extraction_prompt": load_memory_capture_prompt(),
+    }
 
 
 class MemoryService:
@@ -22,30 +74,7 @@ class MemoryService:
 
     async def _get_memory(self) -> AsyncMemory:
         if self._memory is None:
-            self._memory = await AsyncMemory.from_config(
-                config_dict={
-                    "vector_store": {
-                        "provider": "pgvector",
-                        "config": {
-                            "collection_name": settings.LONG_TERM_MEMORY_COLLECTION_NAME,
-                            "dbname": settings.POSTGRES_DB,
-                            "user": settings.POSTGRES_USER,
-                            "password": settings.POSTGRES_PASSWORD,
-                            "host": settings.POSTGRES_HOST,
-                            "port": settings.POSTGRES_PORT,
-                        },
-                    },
-                    "llm": {
-                        "provider": "openai",
-                        "config": {"model": settings.LONG_TERM_MEMORY_MODEL},
-                    },
-                    "embedder": {
-                        "provider": "openai",
-                        "config": {"model": settings.LONG_TERM_MEMORY_EMBEDDER_MODEL},
-                    },
-                    "custom_fact_extraction_prompt": load_memory_capture_prompt(),
-                }
-            )
+            self._memory = await AsyncMemory.from_config(config_dict=build_mem0_config())
         return self._memory
 
     async def initialize(self) -> None:

@@ -160,7 +160,7 @@ class Settings:
         self.GEMINI_BASE_URL = os.getenv("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai/")
 
         # LangGraph Configuration
-        # Still read by mem0's OpenAI provider and the eval judge until they move to Gemini.
+        # Still read by the eval judge until it moves to Gemini.
         self.OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
         self.DEFAULT_LLM_MODEL = os.getenv("DEFAULT_LLM_MODEL", "gemini-3.5-flash-lite")
         self.SESSION_NAMING_MODEL = os.getenv("SESSION_NAMING_MODEL", "gemma-4-31b-it")
@@ -173,8 +173,14 @@ class Settings:
         self.LLM_TOTAL_TIMEOUT = int(os.getenv("LLM_TOTAL_TIMEOUT", "60"))
 
         # Long term memory Configuration
-        self.LONG_TERM_MEMORY_MODEL = os.getenv("LONG_TERM_MEMORY_MODEL", "gpt-5-nano")
-        self.LONG_TERM_MEMORY_EMBEDDER_MODEL = os.getenv("LONG_TERM_MEMORY_EMBEDDER_MODEL", "text-embedding-3-small")
+        # Must be a registry name. Not Gemma: its thinking can't be disabled, takes ~30s, and leaks
+        # a <thought> block into the reply that mem0 can't parse as JSON. Flash Lite costs 1-2 agent-quota
+        # calls per turn; the embedding model has its own quota.
+        self.LONG_TERM_MEMORY_MODEL = os.getenv("LONG_TERM_MEMORY_MODEL", "gemini-3.5-flash-lite")
+        self.LONG_TERM_MEMORY_EMBEDDER_MODEL = os.getenv("LONG_TERM_MEMORY_EMBEDDER_MODEL", "gemini-embedding-2")
+        # pgvector's HNSW index caps `vector` at 2000 dims, so the 3072-dim default must be truncated.
+        # Changing this requires dropping the existing collection table (mem0 never alters it).
+        self.LONG_TERM_MEMORY_EMBEDDING_DIMS = int(os.getenv("LONG_TERM_MEMORY_EMBEDDING_DIMS", "1536"))
         self.LONG_TERM_MEMORY_COLLECTION_NAME = os.getenv("LONG_TERM_MEMORY_COLLECTION_NAME", "longterm_memory")
         # JWT Configuration
         self.JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "")
