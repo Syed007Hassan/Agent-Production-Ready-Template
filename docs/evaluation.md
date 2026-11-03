@@ -72,9 +72,19 @@ Reports are saved to `evals/reports/evaluation_report_YYYYMMDD_HHMMSS.json`:
 
 ## Eval LLM configuration
 
-The evaluator uses a separate LLM config so you can use a different (cheaper) model for judging:
+The judge is **one fixed model** with its own client — it never uses the agent's fallback chain, because switching judges mid-run would make scores incomparable between runs.
 
 ```bash
-EVALUATION_LLM=gpt-5
-EVALUATION_API_KEY=...   # defaults to OPENAI_API_KEY if not set
+EVALUATION_LLM=gemini-3.5-flash-lite   # default
+EVALUATION_BASE_URL=...                # defaults to GEMINI_BASE_URL
+EVALUATION_API_KEY=...                 # defaults to GEMINI_API_KEY
+EVALUATION_MAX_RPM=12                  # judge calls per minute
 ```
+
+### Free-tier behaviour
+
+- **Throttled:** judge calls are spaced to `EVALUATION_MAX_RPM` (default 12, under the free tier's 15 RPM). Each trace costs one call per metric.
+- **Per-minute 429:** waits Google's `retryDelay`, then retries the same judge (tenacity, 3 attempts). 5xx and timeouts back off exponentially.
+- **Daily 429:** the run **stops** instead of switching models. The report has `stopped_early: true` and `traces_remaining`. Scores are pushed only after every metric for a trace succeeds, so unscored traces are picked up by the next run — rerun after the daily reset (midnight Pacific).
+- Only traces from the **last 24 hours** are fetched, so resume within a day.
+- The judge's calls share the daily quota of `EVALUATION_LLM` with the app when they're the same model.

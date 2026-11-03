@@ -6,92 +6,40 @@ A production-ready template for building AI agent backends with FastAPI and Lang
 
 ---
 
-## Powered by Atlas Cloud — Drop-in LLM Backend for LangGraph Agents
+## Runs on the Gemini API free tier
 
-<div align="center">
-  <a href="https://www.atlascloud.ai/?utm_source=github&utm_medium=link&utm_campaign=fastapi-langgraph-agent-production-ready-template">
-    <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="docs/atlas-cloud-logo-dark.png"/>
-      <img src="docs/atlas-cloud-logo.png" alt="Atlas Cloud" width="200"/>
-    </picture>
-  </a>
-</div>
+> Fork of [wassim249/fastapi-langgraph-agent-production-ready-template](https://github.com/wassim249/fastapi-langgraph-agent-production-ready-template) (MIT), reworked to run entirely on the **Gemini API free tier** — no paid LLM provider.
 
-[**Atlas Cloud**](https://www.atlascloud.ai/?utm_source=github&utm_medium=link&utm_campaign=fastapi-langgraph-agent-production-ready-template) provides an **OpenAI-compatible LLM API** that integrates seamlessly into this FastAPI + LangGraph template — no code changes to your agent graph needed. Just swap `OPENAI_BASE_URL` and `OPENAI_API_KEY` to access **DeepSeek, Qwen, GLM, Kimi, MiniMax, Gemini, Claude, GPT** and more through a single unified endpoint.
+Every model is reached through Gemini's [OpenAI-compatible endpoint](https://ai.google.dev/gemini-api/docs/openai), so the stack keeps using LangChain's `ChatOpenAI` and the OpenAI SDK's error types. Free-tier quotas are **per model**, so the agent falls back across models with separate quotas:
 
-The `LLMRegistry` in this template uses `langchain_openai.ChatOpenAI` — Atlas Cloud is wire-compatible, so you get instant access to 130+ curated models without touching any LangGraph logic.
-
-### Quick Setup
-
-**Step 1 — Get your free API key:** [atlascloud.ai/console/coding-plan](https://www.atlascloud.ai/console/coding-plan)
-
-**Step 2 — Update `.env.development`:**
-
-```env
-OPENAI_API_KEY=<your-atlascloud-key>
-OPENAI_BASE_URL=https://api.atlascloud.ai/v1
-DEFAULT_LLM_MODEL=deepseek-ai/deepseek-v4-pro
+```
+Agent calls     ──► 3.5 Flash Lite ──429──► 3.1 Flash Lite ──429──► 3.8 Flash ──► 503 "usage limit reached"
+Session titles  ──► Gemma 4 31B          (own quota, strict structured output)
+mem0 facts      ──► 3.5 Flash Lite       (JSON mode)
+mem0 embeddings ──► Gemini Embedding 2   (1536 dims, own quota)
+Eval judge      ──► 3.5 Flash Lite       (one fixed model, throttled to 12 RPM)
+Unit tests      ──► stub models          (no network)
 ```
 
-**Step 3 — Or use directly in code:**
+**Setup**
 
-```python
-from langchain_openai import ChatOpenAI
+1. Create a key at [aistudio.google.com/apikey](https://aistudio.google.com/apikey). **Don't link a billing account** to its Google Cloud project — that moves it off the free tier.
+2. Copy `.env.example` to `.env.development` and set:
 
-llm = ChatOpenAI(
-    model="deepseek-ai/deepseek-v4-pro",
-    openai_api_base="https://api.atlascloud.ai/v1",
-    openai_api_key="<your-atlascloud-key>",
-    max_tokens=512,  # reasoning model requires max_tokens >= 512
-)
-```
+   ```env
+   GEMINI_API_KEY=<your-gemini-key>
+   DEFAULT_LLM_MODEL=gemini-3.5-flash-lite
+   MEM0_TELEMETRY=False
+   ```
 
-This works as a drop-in replacement anywhere `ChatOpenAI` is used in your LangGraph agent — including the `LLMRegistry`, the circular fallback service, and mem0 long-term memory.
+**What the fallback does** (details in [docs/llm-service.md](docs/llm-service.md)):
 
-<details>
-<summary>📋 Model catalog — a current selection (136 available in total)</summary>
+- Reads Google's `QuotaFailure` / `RetryInfo` error details to tell a **per-minute** 429 (skip that model for `retryDelay`) from a **per-day** 429 (skip it until midnight Pacific).
+- Retries the same model only on transient 5xx errors; timeouts and quota errors move straight to the next model.
+- Each request starts at the top of the chain — fallback is never sticky or shared between requests.
+- When every model is out, `/chat` returns **503 with `Retry-After`** instead of a raw error.
 
-| Model ID | Provider |
-|---|---|
-| `openai/gpt-5.6-luna` | OpenAI |
-| `openai/gpt-5.6-sol` | OpenAI |
-| `openai/gpt-5.6-terra` | OpenAI |
-| `openai/gpt-5.5` | OpenAI |
-| `openai/gpt-5.4` | OpenAI |
-| `openai/gpt-5.4-mini` | OpenAI |
-| `openai/gpt-5.4-nano` | OpenAI |
-| `openai/gpt-5.3-codex` | OpenAI |
-| `openai/gpt-5.2` | OpenAI |
-| `anthropic/claude-opus-5` | Anthropic |
-| `anthropic/claude-sonnet-5` | Anthropic |
-| `anthropic/claude-opus-4.8` | Anthropic |
-| `anthropic/claude-sonnet-4.6` | Anthropic |
-| `anthropic/claude-haiku-4.5-20251001` | Anthropic |
-| `google/gemini-3.5-flash` | Google |
-| `google/gemini-3.1-pro-preview` | Google |
-| `google/gemini-3.1-flash-lite` | Google |
-| `google/gemini-2.5-pro` | Google |
-| `deepseek-ai/deepseek-v4-pro` | DeepSeek |
-| `deepseek-ai/deepseek-v4-flash` | DeepSeek |
-| `qwen/qwen3.8-max` | Alibaba Qwen |
-| `qwen/qwen3.7-plus` | Alibaba Qwen |
-| `qwen/qwen3.5-plus` | Alibaba Qwen |
-| `moonshotai/kimi-k3` | Moonshot AI |
-| `moonshotai/kimi-k2.7-code` | Moonshot AI |
-| `zai-org/glm-5.2` | Zhipu AI |
-| `zai-org/glm-5.1` | Zhipu AI |
-| `zai-org/glm-5` | Zhipu AI |
-| `minimaxai/minimax-m3` | MiniMax |
-| `minimaxai/minimax-m2.7` | MiniMax |
-| `xai/grok-4.6` | xAI |
-| `xai/grok-4.5` | xAI |
-| `bytedance/doubao-seed-2.1-pro-260628` | ByteDance |
-| `xiaomi/mimo-v2.5-pro` | Xiaomi |
-| `tencent/hy3` | Tencent |
-
-[View live model list →](https://www.atlascloud.ai/?utm_source=github&utm_medium=link&utm_campaign=fastapi-langgraph-agent-production-ready-template)
-
-</details>
+**Known limitation:** falling back between models of one provider handles *quota exhaustion*, not a Google outage or an invalid key — all models fail together then. Providers are just `base_url` + key entries in `app/services/llm/registry.py`, so a second OpenAI-compatible provider can be added for cross-provider fallback.
 
 ---
 
@@ -99,7 +47,7 @@ This works as a drop-in replacement anywhere `ChatOpenAI` is used in your LangGr
 
 - **LangGraph** stateful agent with checkpointing, tool calling, and human-in-the-loop support
 - **Long-term memory** via mem0 + pgvector — semantic search per user, cache-backed
-- **LLM service** with circular model fallback, exponential backoff retries, and total timeout budget
+- **LLM service** with quota-aware fallback across Gemini models, retries for transient errors, per-call and total timeout budgets
 - **Langfuse** tracing on all LLM calls; Prometheus metrics + Grafana dashboards
 - **JWT auth** with session management; rate limiting via slowapi
 - **Alembic** migrations; optional Valkey/Redis cache layer
@@ -109,7 +57,7 @@ This works as a drop-in replacement anywhere `ChatOpenAI` is used in your LangGr
 
 ```bash
 git clone <repo-url> my-agent && cd my-agent
-cp .env.example .env.development   # fill in your keys
+cp .env.example .env.development   # set GEMINI_API_KEY and JWT_SECRET_KEY
 make install
 make docker-up                     # starts API + PostgreSQL
 ```
@@ -150,6 +98,7 @@ app/
   services/        # LLM, database, memory services
 alembic/           # Database migrations
 evals/             # LLM evaluation framework
+tests/             # Offline tests with stub models (uv run --group test pytest)
 ```
 
 ## Contributing
@@ -178,23 +127,21 @@ The base LangGraph quickstart stops at "agent runs locally". This template adds 
 Recommended but not required. `make docker-up` starts the API + PostgreSQL together. For local-only setup see [docs/getting-started.md](docs/getting-started.md).
 
 **Which LLM providers are supported?**
-Any provider LangChain's [`init_chat_model`](https://python.langchain.com/docs/how_to/chat_models_universal_init/) supports. The `LLMRegistry` in `app/services/llm/registry.py` builds every model through `init_chat_model`, so a bare name like `gpt-5.6-luna` keeps resolving to OpenAI unchanged, while a `provider:model` string (e.g. `anthropic:claude-opus-4-6`, `ollama:llama3`) adds any other provider. Install that provider's LangChain integration package — see the `anthropic` / `ollama` / `google-genai` extras in `pyproject.toml` — and set its API key via the provider's own env var (e.g. `ANTHROPIC_API_KEY`). Configure the default model via `DEFAULT_LLM_MODEL` in `.env.development`.
-
-```bash
-# uv sync with the anthropic extra installed
-uv sync --extra anthropic
-```
+Any provider with an **OpenAI-compatible endpoint**. The default is the Gemini API free tier. Providers are `base_url` + key entries in `PROVIDERS` in `app/services/llm/registry.py`; models are `LLM_CONFIGS` entries with a `provider` and a `role`:
 
 ```python
 # app/services/llm/registry.py
 LLM_CONFIGS: List[Dict[str, Any]] = [
-    {"name": "gpt-5.6-luna", "model": "gpt-5.6-luna", "kwargs": {...}},  # OpenAI, unchanged
-    {"name": "claude-opus", "model": "anthropic:claude-opus-4-6", "kwargs": {"temperature": 0.2}},
+    {"name": "gemini-3.5-flash-lite", "model": "gemini-3.5-flash-lite", "provider": "gemini", "role": ROLE_AGENT,
+     "kwargs": {"max_completion_tokens": settings.MAX_TOKENS}},
+    ...
 ]
 ```
 
+Keeping every provider OpenAI-compatible means one client and one error hierarchy, which the quota-aware fallback relies on. List the exact model IDs your key can use with `curl "https://generativelanguage.googleapis.com/v1beta/models" -H "x-goog-api-key: $GEMINI_API_KEY"`.
+
 **How do I configure long-term memory?**
-Long-term memory is self-hosted: mem0 runs in-process and persists into your existing PostgreSQL via pgvector — there is no separate mem0 cloud account or API key. You only need a working `OPENAI_API_KEY` (used for fact extraction + embeddings) and the pgvector extension enabled. See [docs/memory.md](docs/memory.md) for details.
+Long-term memory is self-hosted: mem0 runs in-process and persists into your existing PostgreSQL via pgvector — there is no separate mem0 cloud account or API key. It uses your `GEMINI_API_KEY` for fact extraction (Flash Lite) and embeddings (Gemini Embedding 2 at 1536 dims, under pgvector's 2000-dim HNSW limit). See [docs/memory.md](docs/memory.md) for details.
 
 ### Development
 
@@ -218,7 +165,7 @@ graph_builder.add_edge("research_agent", "chat")
 `chat` then acts as the supervisor: return `Command(goto="research_agent")` to delegate, and the sub-agent's reply comes back to `chat`. Add one node per specialist. For a prebuilt version, see [`langgraph-supervisor`](https://github.com/langchain-ai/langgraph-supervisor-py).
 
 **How does the LLM service handle failures?**
-Two layers: (1) per-call exponential-backoff retry via `tenacity`, (2) **circular fallback** — if the active model exhausts its retries, the service rotates to the next model in `LLMRegistry` and continues. A total timeout budget caps the whole call so latency stays bounded. See [docs/llm-service.md](docs/llm-service.md).
+Each failure is classified by what it means for the next attempt: a 429 blocks that model (for Google's `retryDelay`, or until the daily reset) and moves to the next model with its own quota; a transient 5xx is retried on the same model via `tenacity`; an auth error stops immediately. A per-call timeout lets a hung model be skipped, and a total timeout caps the whole call. If no model can answer, the API returns 503 with `Retry-After`. See [docs/llm-service.md](docs/llm-service.md).
 
 **Can I use this without Langfuse?**
 Yes. Set `LANGFUSE_TRACING_ENABLED=false` (or omit the Langfuse keys). The agent runs unchanged; structured logs still capture request/session/user context.
@@ -232,8 +179,12 @@ Yes. Set `LANGFUSE_TRACING_ENABLED=false` (or omit the Langfuse keys). The agent
 
 **Memory / semantic search returns nothing**
 - Verify the `pgvector` extension is enabled in your PostgreSQL instance
-- Confirm `OPENAI_API_KEY` is valid (mem0 calls OpenAI for fact extraction + embeddings)
+- Confirm `GEMINI_API_KEY` is valid (mem0 calls Gemini for fact extraction + embeddings)
+- If you changed `LONG_TERM_MEMORY_EMBEDDING_DIMS`, drop the `longterm_memory` table so mem0 recreates it
 - Check `LONG_TERM_MEMORY_MODEL` and `LONG_TERM_MEMORY_EMBEDDER_MODEL` are set in `.env.development`
+
+**Chat returns 503 "usage limit reached"**
+Every model in the agent chain hit its free-tier quota. Per-minute limits clear within a minute; daily limits reset at midnight Pacific. The `Retry-After` header says how long to wait, and `llm_model_blocked` log lines show which model hit which limit.
 
 **Rate limiting is too aggressive**
 Limits are defined in `app/core/limiter.py` (slowapi). Adjust per-route decorators or the default rate in that file. See [docs/configuration.md](docs/configuration.md) for the related env vars.

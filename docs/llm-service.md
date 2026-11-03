@@ -2,83 +2,109 @@
 
 ## Overview
 
-The LLM service (`app/services/llm/`) handles all language model calls with automatic retries, circular model fallback, and a total timeout budget. Your agent code calls `llm_service.call(messages)` — the service handles everything else.
+The LLM service (`app/services/llm/`) handles all language model calls with quota-aware fallback, retries for transient errors, and a total timeout budget. Agent code calls `llm_service.call(messages)` — the service handles everything else.
 
-The package is split into two modules:
+The package is split into three modules:
 
-- `app/services/llm/registry.py` — `LLMRegistry`: defines available models
+- `app/services/llm/registry.py` — `LLMRegistry`: providers, models, and their roles
+- `app/services/llm/availability.py` — error classification and per-model quota tracking
 - `app/services/llm/service.py` — `LLMService`: call logic, retries, fallback, structured output
+
+## Providers
+
+Every provider is reached through its **OpenAI-compatible endpoint**, so all models share one client (`ChatOpenAI`) and one error hierarchy (`openai.RateLimitError`, …). A provider is just a `base_url` plus a key:
+
+```python
+# app/services/llm/registry.py
+PROVIDERS = {
+    "gemini": {"base_url": settings.GEMINI_BASE_URL, "api_key": SecretStr(settings.GEMINI_API_KEY)},
+}
+```
+
+The default (and only) provider is the **Gemini API free tier** at `https://generativelanguage.googleapis.com/v1beta/openai/`. Adding a second OpenAI-compatible provider means one `PROVIDERS` entry and one key in config.
+
+> **Do not link a billing account** to the Google Cloud project behind your key: that moves it off the free tier and usage becomes paid.
 
 ## Model registry
 
-Models are defined in `LLMRegistry.LLM_CONFIGS` in order of preference:
+Models are defined in `LLMRegistry.LLM_CONFIGS`. Each entry has a **role**, and fallback only ever moves between models of the same role:
 
-| Name           | Model        | Notes                              |
-| -------------- | ------------ | ----------------------------------- |
-| `gpt-5.6-luna` | gpt-5.6-luna | Default. Medium reasoning effort.  |
-| `gpt-5.4`      | gpt-5.4      | Medium reasoning effort.           |
-| `gpt-5.4-mini` | gpt-5.4-mini | Low reasoning effort.              |
-| `gpt-5.4-nano` | gpt-5.4-nano | Fast, low reasoning effort.        |
+| Name                    | Role         | Free-tier limits (RPM / RPD) | Used for                                |
+| ----------------------- | ------------ | ---------------------------- | --------------------------------------- |
+| `gemini-3.5-flash-lite` | `agent`      | 15 / 500                     | Default agent model; mem0 fact extraction |
+| `gemini-3.1-flash-lite` | `agent`      | 15 / 500                     | Fallback 1 (separate quota)             |
+| `gemini-3.8-flash`      | `agent`      | 5 / 20                       | Fallback 2 (last resort)                |
+| `gemma-4-31b-it`        | `classifier` | 30 / 14.4K (16K TPM)         | Session titles                          |
 
-Set `DEFAULT_LLM_MODEL` in your `.env` to choose the starting model.
+Free-tier quotas are **per model and per Google Cloud project** (not per key), so each fallback hop buys fresh capacity. Limits change; check AI Studio for your project's current numbers.
 
-Every entry is built through LangChain's `init_chat_model`. A bare `model` name (like the ones above) is inferred as OpenAI, so existing entries and env vars keep working unchanged. To add a model from another provider, prefix `model` with `provider:`, e.g.:
+Set `DEFAULT_LLM_MODEL` to choose the agent's starting model, and `SESSION_NAMING_MODEL` for session titles.
 
-```python
-{"name": "claude-opus", "model": "anthropic:claude-opus-4-6", "kwargs": {"temperature": 0.2}},
-```
+**Notes from testing**
 
-That provider's LangChain integration package must be installed (`uv sync --extra anthropic`, `--extra ollama`, or `--extra google-genai`) and its API key set via the provider's own env var (e.g. `ANTHROPIC_API_KEY`) — the registry does not manage non-OpenAI credentials itself.
+- `reasoning` is not set on any entry: in `ChatOpenAI` it switches to OpenAI's Responses API, which Gemini's endpoint does not implement.
+- Gemma's thinking cannot be disabled (`reasoning_effort` returns a 400). It spends hidden thinking tokens, can take 3–30 s, and in plain JSON mode leaks a `<thought>` block into the reply. Strict structured output (`response_format=Schema`) comes back clean, which is why session titles work on it.
 
-To add or change models, edit `LLMRegistry.LLM_CONFIGS` in `app/services/llm/registry.py`.
-
-## Retry and fallback behaviour
+## Fallback behaviour
 
 ```mermaid
 flowchart TD
     Call["llm_service.call(messages)"]
-    TotalTimeout["asyncio.wait_for\nLLM_TOTAL_TIMEOUT seconds"]
-    Try["Try current model"]
-    Retry{"Retryable error?\n(rate limit, timeout, API error)"}
-    MaxRetries{"MAX_LLM_CALL_RETRIES\nreached?"}
-    NextModel{"More models\nto try?"}
-    Backoff["Exponential backoff\n2s → 4s → 8s"]
-    Switch["Switch to next model\n(circular)"]
+    Chain["Fallback chain for the starting model's role\n(always starts at the top)"]
+    Blocked{"Model blocked\n(out of quota)?"}
+    Try["Call model\n(per-call timeout LLM_CALL_TIMEOUT)"]
+    Kind{"Failure kind"}
+    Daily["Block until midnight Pacific"]
+    Minute["Block for Google's retryDelay"]
+    Retry["Retry same model\n(tenacity, MAX_LLM_CALL_RETRIES)"]
+    Next{"More models\nin chain?"}
     Success["Return response"]
-    Fail["Raise RuntimeError"]
+    Auth["Raise immediately"]
+    Unavailable["Raise LLMUnavailableError\n→ HTTP 503 + Retry-After"]
 
-    Call --> TotalTimeout --> Try
-    Try --> Retry
-    Retry -->|yes| Backoff --> MaxRetries
-    MaxRetries -->|no| Try
-    MaxRetries -->|yes| NextModel
-    Retry -->|no| Fail
-    NextModel -->|yes| Switch --> Try
-    NextModel -->|no| Fail
+    Call --> Chain --> Blocked
+    Blocked -->|yes| Next
+    Blocked -->|no| Try
     Try -->|success| Success
+    Try -->|error| Kind
+    Kind -->|429 per day| Daily --> Next
+    Kind -->|429 per minute| Minute --> Next
+    Kind -->|5xx / connection| Retry --> Next
+    Kind -->|timeout / other| Next
+    Kind -->|401 / 403| Auth
+    Next -->|yes| Blocked
+    Next -->|no| Unavailable
 ```
 
-**Retry config** (per model):
+| Failure | Detected by | What happens |
+| ------- | ----------- | ------------ |
+| Daily quota (429) | `QuotaFailure.violations[].quotaId` contains `PerDay` | Model skipped until the daily reset (midnight Pacific) |
+| Per-minute quota (429) | any other 429 | Model skipped for `RetryInfo.retryDelay` (60 s if absent) |
+| Server error (5xx, connection) | `InternalServerError`, `APIConnectionError` | Retried on the same model, then next model; never blocked |
+| Timeout | `APITimeoutError` | Next model, no retry |
+| Auth (401 / 403) | `AuthenticationError`, `PermissionDeniedError` | Raised at once — every model shares the key |
+| Anything else (400, parse error) | — | Next model |
 
-- Max attempts: `MAX_LLM_CALL_RETRIES` (default: 3)
-- Wait: exponential backoff, 2s min, 10s max
-- Retries on: `openai`'s `RateLimitError`, `APITimeoutError`, `APIError`
+Key properties:
 
-  These are OpenAI-specific exception types. A non-OpenAI registry entry (e.g. `anthropic:claude-opus-4-6`) still gets circular fallback to the next model on any exception, but not the per-model exponential-backoff retry until that provider's error types are added to this tuple too.
+- **Not sticky, not shared.** Each call starts at the head of its chain; one request's fallback never changes where another request starts.
+- **No wasted calls.** A blocked model is skipped without a request. OpenAI-SDK retries are disabled (`max_retries=0`) so the service owns retry policy.
+- **Bounded latency.** `LLM_CALL_TIMEOUT` (default 20 s) per call lets a hung model be skipped; `LLM_TOTAL_TIMEOUT` (default 60 s) caps the whole call.
+- **Graceful failure.** When no model can serve the call, `LLMUnavailableError` carries `quota_exhausted` and `retry_after_seconds`. `/chat` returns **503** with a `Retry-After` header; `/chat/stream` sends a user-safe final event.
 
-**Total timeout**: `LLM_TOTAL_TIMEOUT` seconds (default: 60s) caps the entire loop. Without this, worst case is `retries × models × max_wait` — potentially 2+ minutes.
+**Known limitation:** fallback between models of one provider handles *quota exhaustion*, not a provider outage, an invalid key, or a policy block — all models fail together then. Cross-provider fallback would need a second `PROVIDERS` entry.
 
-**Fallback order**: circular through `LLMRegistry.LLMS`. After the last model, wraps back to the first and stops after one full cycle.
+**Process-local state:** blocks live in memory per worker, so with several uvicorn workers each one learns a model is exhausted from its own first 429.
 
 ## Tools
 
-Tools are bound to the LLM at startup:
+Tools are bound once at startup to every model in the default chain:
 
 ```python
 llm_service.bind_tools(tools)
 ```
 
-When a model is switched during fallback, the tools are re-bound to the new model automatically.
+Fallback picks the pre-bound instance for the next model, so tool bindings survive model switches.
 
 ## Structured output
 
@@ -89,26 +115,29 @@ from app.schemas.my_schema import MySchema
 
 result: MySchema = await llm_service.call(
     messages,
-    model_name="gpt-5.4-nano",   # optional — uses current default if omitted
+    model_name="gemma-4-31b-it",   # optional — uses the default agent model if omitted
     response_format=MySchema,
-    temperature=0.2,
+    max_completion_tokens=256,
 )
 ```
 
-The service chains `.with_structured_output(schema)` on the resolved model and re-wraps it on every fallback attempt, so retries and model switching work transparently.
+The service chains `.with_structured_output(schema)` on each model it tries, so fallback works transparently. Overrides merge on top of the registry entry's kwargs; the endpoint and key always come from the entry's provider.
 
 ## Adding a new model
 
 ```python
 # app/services/llm/registry.py — LLMRegistry.LLM_CONFIGS
 {
-    "name": "gpt-5.4",
-    "model": "gpt-5.4",  # or "provider:model", e.g. "anthropic:claude-opus-4-6"
-    "kwargs": {
-        "max_completion_tokens": settings.MAX_TOKENS,
-        "reasoning": {"effort": "medium"},  # OpenAI-only; drop for other providers
-    },
+    "name": "gemini-3.6-flash",
+    "model": "gemini-3.6-flash",      # exact ID from the provider's models list
+    "provider": "gemini",
+    "role": ROLE_AGENT,
+    "kwargs": {"max_completion_tokens": settings.MAX_TOKENS},
 },
 ```
 
-Add it at any position in the list. The fallback order follows the list order.
+Position within a role sets its fallback order. List the exact model IDs your key can use with:
+
+```bash
+curl -s "https://generativelanguage.googleapis.com/v1beta/models" -H "x-goog-api-key: $GEMINI_API_KEY"
+```

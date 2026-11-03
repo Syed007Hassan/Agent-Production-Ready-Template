@@ -18,7 +18,7 @@ cd my-agent
 
 # Copy and fill in your env file
 cp .env.example .env.development
-# Required: OPENAI_API_KEY, JWT_SECRET_KEY
+# Required: GEMINI_API_KEY (free, from https://aistudio.google.com/apikey), JWT_SECRET_KEY
 # Optional: LANGFUSE_* keys (or set LANGFUSE_TRACING_ENABLED=false)
 
 make install       # installs Python deps + pre-commit hooks
@@ -35,7 +35,7 @@ git clone <repo-url> my-agent
 cd my-agent
 
 cp .env.example .env.development
-# Fill in: OPENAI_API_KEY, JWT_SECRET_KEY, POSTGRES_* (point to your DB)
+# Fill in: GEMINI_API_KEY, JWT_SECRET_KEY, POSTGRES_* (point to your DB)
 
 make install       # installs deps + pre-commit hooks
 make migrate       # creates tables via Alembic
@@ -89,7 +89,7 @@ The parts you'll most likely change:
 |---|---|
 | Agent personality & instructions | `app/core/prompts/system.md` |
 | Available tools | `app/core/langgraph/tools.py` |
-| LLM models & fallback order | `app/services/llm.py` → `LLMRegistry.LLMS` |
+| LLM models & fallback order | `app/services/llm/registry.py` → `LLMRegistry.LLM_CONFIGS` |
 | Memory collection name | `LONG_TERM_MEMORY_COLLECTION_NAME` in `.env` |
 
 ## Running pre-commit hooks

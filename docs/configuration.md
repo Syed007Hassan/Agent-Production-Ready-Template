@@ -27,11 +27,14 @@ cp .env.example .env.development
 
 | Variable | Default | Required | Description |
 | --- | --- | --- | --- |
-| `OPENAI_API_KEY` | — | Yes | OpenAI API key |
-| `DEFAULT_LLM_MODEL` | `gpt-5-mini` | No | Starting model — see [LLM Service](llm-service.md) for fallback order |
+| `GEMINI_API_KEY` | — | Yes | Gemini API key from [AI Studio](https://aistudio.google.com/apikey) (free tier; do not link billing) |
+| `GEMINI_BASE_URL` | `https://generativelanguage.googleapis.com/v1beta/openai/` | No | Gemini's OpenAI-compatible endpoint |
+| `DEFAULT_LLM_MODEL` | `gemini-3.5-flash-lite` | No | Starting agent model — see [LLM Service](llm-service.md) for fallback order |
+| `SESSION_NAMING_MODEL` | `gemma-4-31b-it` | No | Model for auto-generated session titles (separate quota from the agent) |
 | `DEFAULT_LLM_TEMPERATURE` | `0.2` | No | Temperature for chat completions |
 | `MAX_TOKENS` | `2000` | No | Max tokens per LLM response |
-| `MAX_LLM_CALL_RETRIES` | `3` | No | Retries per model before switching to fallback |
+| `MAX_LLM_CALL_RETRIES` | `2` | No | Attempts per model on transient 5xx errors; quota errors switch model immediately |
+| `LLM_CALL_TIMEOUT` | `20` | No | Max seconds for one model call before falling back |
 | `LLM_TOTAL_TIMEOUT` | `60` | No | Max seconds for the entire fallback loop |
 | `SESSION_NAMING_ENABLED` | `true` | No | Auto-generate a session title from the user's first message using an LLM background task |
 
@@ -42,8 +45,10 @@ cp .env.example .env.development
 | Variable | Default | Description |
 | --- | --- | --- |
 | `LONG_TERM_MEMORY_COLLECTION_NAME` | `longterm_memory` | pgvector collection name |
-| `LONG_TERM_MEMORY_MODEL` | `gpt-5-nano` | LLM used by mem0 to extract memories |
-| `LONG_TERM_MEMORY_EMBEDDER_MODEL` | `text-embedding-3-small` | Embedding model for semantic search |
+| `LONG_TERM_MEMORY_MODEL` | `gemini-3.5-flash-lite` | Registry model used by mem0 to extract memories |
+| `LONG_TERM_MEMORY_EMBEDDER_MODEL` | `gemini-embedding-2` | Embedding model for semantic search |
+| `LONG_TERM_MEMORY_EMBEDDING_DIMS` | `1536` | Embedding size; must be ≤ 2000 (pgvector HNSW limit) |
+| `MEM0_TELEMETRY` | `True` (mem0 default) | Set `False` to stop mem0 sending usage events to PostHog |
 
 ---
 

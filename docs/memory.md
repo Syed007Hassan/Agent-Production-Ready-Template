@@ -57,9 +57,25 @@ After the LLM produces a response, memories are updated **in the background** vi
 | Variable | Default | Description |
 | --- | --- | --- |
 | `LONG_TERM_MEMORY_COLLECTION_NAME` | `longterm_memory` | pgvector collection name |
-| `LONG_TERM_MEMORY_MODEL` | `gpt-5-nano` | LLM used by mem0 to extract and process memories |
-| `LONG_TERM_MEMORY_EMBEDDER_MODEL` | `text-embedding-3-small` | Embedding model for semantic search |
+| `LONG_TERM_MEMORY_MODEL` | `gemini-3.5-flash-lite` | Registry model used by mem0 to extract and process memories |
+| `LONG_TERM_MEMORY_EMBEDDER_MODEL` | `gemini-embedding-2` | Embedding model for semantic search |
+| `LONG_TERM_MEMORY_EMBEDDING_DIMS` | `1536` | Embedding size stored in pgvector (≤ 2000) |
 | `CACHE_TTL_SECONDS` | `60` | Memory search cache TTL |
+
+## Running mem0 on Gemini
+
+mem0 runs in-process and stores everything in your PostgreSQL — there is no mem0 account. Its model calls go to Gemini (see `build_mem0_config()` in `app/services/memory.py`):
+
+- **Fact extraction** uses mem0's `langchain` provider with the registry's model instance. mem0's `openai` provider can't be used: it always sends OpenAI's `store` field, which Gemini rejects with a 400. JSON mode is set on the model itself because the `langchain` provider ignores mem0's `response_format`.
+- **Model choice:** Flash Lite, not Gemma. Gemma's thinking can't be disabled, takes up to ~30 s, and leaks a `<thought>` block that mem0 can't parse. The cost is 1–2 calls per chat turn from the agent model's daily quota.
+- **Embeddings** use `gemini-embedding-2` truncated to **1536** dimensions (it returns 3072 by default). mem0 always builds an HNSW index, and pgvector's HNSW index rejects `vector` columns wider than 2000.
+- **Changing the dimension** requires dropping the collection table — mem0 creates it once and never alters it:
+
+  ```sql
+  DROP TABLE IF EXISTS longterm_memory;
+  ```
+
+- **Telemetry:** mem0 sends usage events to PostHog unless `MEM0_TELEMETRY=False` (set in `.env.example`).
 
 ## Startup pre-warming
 

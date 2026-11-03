@@ -118,7 +118,7 @@ graph LR
 | Component | File | Responsibility |
 |---|---|---|
 | LangGraph Agent | `app/core/langgraph/graph.py` | Orchestrates the conversation loop |
-| LLM Service | `app/services/llm/` | Model registry, retries, circular fallback, structured output |
+| LLM Service | `app/services/llm/` | Model registry (Gemini), quota-aware fallback, retries, structured output |
 | Memory Service | `app/services/memory.py` | mem0 semantic memory + cache |
 | Session Naming | `app/services/session_naming.py` | Background LLM title generation for new sessions |
 | Database Service | `app/services/database.py` | User/session CRUD |
