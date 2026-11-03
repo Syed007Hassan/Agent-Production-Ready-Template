@@ -157,6 +157,12 @@ def display_summary(report: Dict[str, Any]) -> None:
             f"  • {metric_name}: {status_color}{success_percent:.1f}%{Style.RESET_ALL} success, avg score: {data['avg_score']:.2f}"
         )
 
+    if report["stopped_early"]:
+        print_warning(
+            f"Stopped early: daily quota for {report['model']} exhausted. "
+            f"{report['traces_remaining']} trace(s) left unscored; rerun after the reset (midnight Pacific)."
+        )
+
     if report["generate_report_path"]:
         print(f"\n{Fore.CYAN}Report generated at:{Style.RESET_ALL} {report['generate_report_path']}")
 

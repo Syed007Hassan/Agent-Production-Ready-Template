@@ -160,8 +160,6 @@ class Settings:
         self.GEMINI_BASE_URL = os.getenv("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai/")
 
         # LangGraph Configuration
-        # Still read by the eval judge until it moves to Gemini.
-        self.OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
         self.DEFAULT_LLM_MODEL = os.getenv("DEFAULT_LLM_MODEL", "gemini-3.5-flash-lite")
         self.SESSION_NAMING_MODEL = os.getenv("SESSION_NAMING_MODEL", "gemma-4-31b-it")
         self.SESSION_NAMING_ENABLED = os.getenv("SESSION_NAMING_ENABLED", "true").lower() == "true"
@@ -238,10 +236,12 @@ class Settings:
                 self.RATE_LIMIT_ENDPOINTS[endpoint] = value
 
         # Evaluation Configuration
-        self.EVALUATION_LLM = os.getenv("EVALUATION_LLM", "gpt-5")
-        self.EVALUATION_BASE_URL = os.getenv("EVALUATION_BASE_URL", "https://api.openai.com/v1")
-        self.EVALUATION_API_KEY = os.getenv("EVALUATION_API_KEY", self.OPENAI_API_KEY)
-        self.EVALUATION_SLEEP_TIME = int(os.getenv("EVALUATION_SLEEP_TIME", "10"))
+        # One fixed judge model, never the fallback chain, so scores stay comparable across runs.
+        self.EVALUATION_LLM = os.getenv("EVALUATION_LLM", "gemini-3.5-flash-lite")
+        self.EVALUATION_BASE_URL = os.getenv("EVALUATION_BASE_URL", self.GEMINI_BASE_URL)
+        self.EVALUATION_API_KEY = os.getenv("EVALUATION_API_KEY", self.GEMINI_API_KEY)
+        # Judge calls per minute; kept under the free-tier 15 RPM so a run never trips the per-minute limit.
+        self.EVALUATION_MAX_RPM = int(os.getenv("EVALUATION_MAX_RPM", "12"))
 
         # Apply environment-specific settings
         self.apply_environment_settings()

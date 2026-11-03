@@ -1,8 +1,6 @@
 """Fallback behaviour of LLMService against stub models (no network calls).
 
-The stubs raise the real OpenAI-SDK exception types, and the 429 bodies are
-copied from an actual Gemini free-tier response, so classification is tested
-against what the provider really sends.
+The stubs raise the real OpenAI-SDK exception types built in ``tests.fakes``.
 """
 
 import asyncio
@@ -12,7 +10,6 @@ from typing import (
     List,
 )
 
-import httpx
 import pytest
 from langchain_core.messages import (
     AIMessage,
@@ -21,8 +18,6 @@ from langchain_core.messages import (
 from openai import (
     APITimeoutError,
     AuthenticationError,
-    InternalServerError,
-    RateLimitError,
 )
 
 from app.services.llm import (
@@ -37,51 +32,15 @@ from app.services.llm.availability import (
     classify_error,
     next_daily_reset,
 )
+from tests.fakes import (
+    REQUEST,
+    auth_401,
+    daily_429,
+    minute_429,
+    server_500,
+)
 
 PRIMARY, SECOND, THIRD = "gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-3.8-flash"
-_REQUEST = httpx.Request("POST", "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions")
-
-
-def _quota_body(quota_id: str, retry_delay: str = "39s") -> list:
-    return [
-        {
-            "error": {
-                "code": 429,
-                "status": "RESOURCE_EXHAUSTED",
-                "details": [
-                    {
-                        "@type": "type.googleapis.com/google.rpc.QuotaFailure",
-                        "violations": [{"quotaId": quota_id, "quotaValue": "500"}],
-                    },
-                    {"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": retry_delay},
-                ],
-            }
-        }
-    ]
-
-
-def minute_429() -> RateLimitError:
-    return RateLimitError(
-        "quota",
-        response=httpx.Response(429, request=_REQUEST),
-        body=_quota_body("GenerateContentInputTokensPerModelPerMinute-FreeTier"),
-    )
-
-
-def daily_429() -> RateLimitError:
-    return RateLimitError(
-        "quota",
-        response=httpx.Response(429, request=_REQUEST),
-        body=_quota_body("GenerateRequestsPerDayPerProjectPerModel-FreeTier"),
-    )
-
-
-def server_500() -> InternalServerError:
-    return InternalServerError("internal", response=httpx.Response(500, request=_REQUEST), body=None)
-
-
-def auth_401() -> AuthenticationError:
-    return AuthenticationError("bad key", response=httpx.Response(401, request=_REQUEST), body=None)
 
 
 class StubModel:
@@ -133,7 +92,7 @@ def test_classifies_minute_and_daily_quota_from_gemini_body():
 
 def test_classifies_timeout_before_connection_error():
     # APITimeoutError subclasses APIConnectionError; it must not be treated as a retryable 5xx.
-    assert classify_error(APITimeoutError(request=_REQUEST)) is FailureKind.TIMEOUT
+    assert classify_error(APITimeoutError(request=REQUEST)) is FailureKind.TIMEOUT
     assert classify_error(server_500()) is FailureKind.SERVER_ERROR
     assert classify_error(auth_401()) is FailureKind.AUTH
 
@@ -177,7 +136,7 @@ def test_server_error_retries_same_model_then_succeeds(availability):
 
 
 def test_timeout_moves_on_without_retry_or_block(availability):
-    service, stubs = make_service({PRIMARY: [APITimeoutError(request=_REQUEST)]})
+    service, stubs = make_service({PRIMARY: [APITimeoutError(request=REQUEST)]})
 
     assert ask(service).content == f"answer from {SECOND}"
     assert stubs[PRIMARY].calls == 1
@@ -208,7 +167,7 @@ def test_all_models_out_of_daily_quota_raises_graceful_error(availability):
 
 
 def test_outage_is_reported_as_unavailable_not_quota(availability):
-    service, _ = make_service({name: [APITimeoutError(request=_REQUEST)] for name in (PRIMARY, SECOND, THIRD)})
+    service, _ = make_service({name: [APITimeoutError(request=REQUEST)] for name in (PRIMARY, SECOND, THIRD)})
 
     with pytest.raises(LLMUnavailableError) as excinfo:
         ask(service)

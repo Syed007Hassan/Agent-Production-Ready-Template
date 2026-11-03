@@ -97,7 +97,8 @@ def _is_daily_quota(exc: Exception) -> bool:
     return False
 
 
-def _retry_delay_seconds(exc: Exception) -> float:
+def retry_delay_seconds(exc: Exception) -> float:
+    """Return the provider's RetryInfo delay for a 429, or a 60s default when it sends none."""
     for detail in _error_details(exc):
         if str(detail.get("@type", "")).endswith("google.rpc.RetryInfo"):
             match = _RETRY_DELAY_PATTERN.match(str(detail.get("retryDelay", "")))
@@ -163,7 +164,7 @@ class ModelAvailability:
         if kind is FailureKind.DAILY_QUOTA:
             until = next_daily_reset().timestamp()
         elif kind is FailureKind.MINUTE_QUOTA:
-            until = time.time() + _retry_delay_seconds(exc)
+            until = time.time() + retry_delay_seconds(exc)
         else:
             return
         self._blocked_until[model_name] = until

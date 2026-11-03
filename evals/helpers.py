@@ -79,6 +79,10 @@ def initialize_report(model_name: str) -> Dict[str, Any]:
         "successful_traces": 0,
         "failed_traces": 0,
         "duration_seconds": 0,
+        # Set when the judge's daily quota ran out; the remaining traces stay unscored for the next run.
+        "stopped_early": False,
+        "traces_remaining": 0,
+        "generate_report_path": None,
         "metrics_summary": {},
         "successful_traces_details": [],
         "failed_traces_details": [],
