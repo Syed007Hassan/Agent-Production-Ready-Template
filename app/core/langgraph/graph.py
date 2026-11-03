@@ -50,7 +50,10 @@ from app.schemas import (
     GraphState,
     Message,
 )
-from app.services.llm import llm_service
+from app.services.llm import (
+    LLMUnavailableError,
+    llm_service,
+)
 from app.services.memory import memory_service
 from app.utils import (
     dump_messages,
@@ -153,7 +156,7 @@ class LangGraphAgent:
         messages = prepare_messages(state.messages, SYSTEM_PROMPT)
 
         try:
-            # Use LLM service with automatic retries and circular fallback
+            # Use LLM service with automatic retries and quota-aware fallback
             with llm_inference_duration_seconds.labels(model=model_name).time():
                 response_message = await self.llm_service.call(dump_messages(messages))
 
@@ -174,6 +177,10 @@ class LangGraphAgent:
                 goto = END
 
             return Command(update={"messages": [response_message]}, goto=goto)
+        except LLMUnavailableError:
+            # Re-raise untouched so the API layer can turn it into a 503 with Retry-After.
+            logger.warning("llm_unavailable_for_chat", session_id=thread_id)
+            raise
         except Exception as e:
             logger.error(
                 "llm_call_failed_all_models",

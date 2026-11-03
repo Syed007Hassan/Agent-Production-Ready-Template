@@ -26,10 +26,16 @@ from app.schemas.chat import (
     ChatResponse,
     StreamResponse,
 )
+from app.services.llm import LLMUnavailableError
 from app.services.session_naming import maybe_name_session
 
 router = APIRouter()
 agent = LangGraphAgent()
+
+
+def _retry_after_header(error: LLMUnavailableError) -> dict[str, str] | None:
+    """Build a Retry-After header when the error knows when a model frees up."""
+    return {"Retry-After": str(error.retry_after_seconds)} if error.retry_after_seconds else None
 
 
 @router.post("/chat", response_model=ChatResponse)
@@ -69,6 +75,14 @@ async def chat(
         logger.info("chat_request_processed", session_id=session.id)
 
         return ChatResponse(messages=result)
+    except LLMUnavailableError as e:
+        logger.warning(
+            "chat_request_llm_unavailable",
+            session_id=session.id,
+            quota_exhausted=e.quota_exhausted,
+            retry_after_seconds=e.retry_after_seconds,
+        )
+        raise HTTPException(status_code=503, detail=e.user_message, headers=_retry_after_header(e))
     except Exception as e:
         logger.exception("chat_request_failed", session_id=session.id, error=str(e))
         raise HTTPException(status_code=500, detail=str(e))
@@ -125,6 +139,16 @@ async def chat_stream(
                 final_response = StreamResponse(content="", done=True)
                 yield f"data: {json.dumps(final_response.model_dump(mode='json'))}\n\n"
 
+            except LLMUnavailableError as e:
+                # Headers are already sent, so the 503 travels as the final event's content.
+                logger.warning(
+                    "stream_chat_request_llm_unavailable",
+                    session_id=session.id,
+                    quota_exhausted=e.quota_exhausted,
+                    retry_after_seconds=e.retry_after_seconds,
+                )
+                error_response = StreamResponse(content=e.user_message, done=True)
+                yield f"data: {json.dumps(error_response.model_dump(mode='json'))}\n\n"
             except Exception as e:
                 logger.exception(
                     "stream_chat_request_failed",

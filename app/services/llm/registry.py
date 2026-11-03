@@ -38,7 +38,15 @@ def _build_llm(config: Dict[str, Any], **overrides: Any) -> BaseChatModel:
     override can never send a request to the wrong endpoint or with the wrong key.
     """
     provider = PROVIDERS[config["provider"]]
-    kwargs = {**config.get("kwargs", {}), **overrides}
+    kwargs = {
+        # A per-call timeout lets a hung model be skipped instead of eating the
+        # whole LLM_TOTAL_TIMEOUT budget. SDK retries are off because LLMService
+        # owns retry policy (its own retries plus fallback across models).
+        "timeout": settings.LLM_CALL_TIMEOUT,
+        "max_retries": 0,
+        **config.get("kwargs", {}),
+        **overrides,
+    }
     return init_chat_model(
         f"openai:{config['model']}",
         base_url=provider["base_url"],
