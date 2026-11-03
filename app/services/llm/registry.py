@@ -13,41 +13,38 @@ from pydantic import SecretStr
 from app.core.config import settings
 from app.core.logging import logger
 
-_API_KEY = SecretStr(settings.OPENAI_API_KEY)
+# Every provider is reached through its OpenAI-compatible endpoint, so all
+# models share one client (ChatOpenAI) and one error hierarchy — the retry and
+# fallback logic in LLMService matches on `openai.RateLimitError` etc.
+# Adding a provider means one entry here plus its key in config, no code changes.
+PROVIDERS: Dict[str, Dict[str, Any]] = {
+    "gemini": {
+        "base_url": settings.GEMINI_BASE_URL,
+        "api_key": SecretStr(settings.GEMINI_API_KEY),
+    },
+}
 
-# Every model here is a reasoning model, and the API rejects the classic sampling
-# knobs (`top_p`, `presence_penalty`, `frequency_penalty`) with a 400 once
-# `reasoning` is set. Tune quality with `reasoning.effort` instead.
+# Roles keep fallback chains separate: an "agent" call only ever falls back to
+# another "agent" model, so side calls never eat the main chat quota (and vice versa).
+ROLE_AGENT = "agent"
+ROLE_CLASSIFIER = "classifier"
 
 
-def _is_openai_model(model: str) -> bool:
-    """Return whether `model` resolves to the OpenAI provider.
+def _build_llm(config: Dict[str, Any], **overrides: Any) -> BaseChatModel:
+    """Construct a chat model for a registry entry.
 
-    Mirrors `init_chat_model`'s own inference: a bare `gpt-*` name (no
-    `provider:` prefix) is OpenAI, same as an explicit `openai:` prefix.
+    Entry kwargs are the defaults; ``overrides`` win on conflicts. Connection
+    details (base_url, api_key) always come from the entry's provider, so an
+    override can never send a request to the wrong endpoint or with the wrong key.
     """
-    return model.startswith("openai:") or (":" not in model and model.startswith("gpt-"))
-
-
-def _build_llm(model: str, **kwargs: Any) -> BaseChatModel:
-    """Construct a chat model via `init_chat_model`.
-
-    `model` accepts either a bare name that `init_chat_model` infers a
-    provider for (e.g. "gpt-5.6-luna" -> OpenAI, keeping existing `gpt-*`
-    registry entries working unchanged) or an explicit "provider:model"
-    string for any other provider (e.g. "anthropic:claude-opus-4-6",
-    "ollama:llama3"). Non-OpenAI providers need their LangChain integration
-    package installed (see the `anthropic` / `ollama` extras in
-    pyproject.toml) and read their API key from the provider's own env var
-    (e.g. `ANTHROPIC_API_KEY`). An OpenAI-compatible third party (an
-    `openai:` model with a custom `base_url`) must pass its own `api_key`.
-    """
-    if _is_openai_model(model):
-        # Without its own key, ChatOpenAI would send OPENAI_API_KEY to the custom endpoint.
-        if kwargs.keys() & {"base_url", "openai_api_base"} and not kwargs.keys() & {"api_key", "openai_api_key"}:
-            raise ValueError(f"'{model}' sets a custom base_url but no api_key; pass that endpoint's own api_key")
-        kwargs.setdefault("api_key", _API_KEY)
-    return init_chat_model(model, **kwargs)
+    provider = PROVIDERS[config["provider"]]
+    kwargs = {**config.get("kwargs", {}), **overrides}
+    return init_chat_model(
+        f"openai:{config['model']}",
+        base_url=provider["base_url"],
+        api_key=provider["api_key"],
+        **kwargs,
+    )
 
 
 class LLMRegistry:
@@ -57,51 +54,46 @@ class LLMRegistry:
     methods to retrieve them by name with optional argument overrides.
     """
 
-    # Ordered by preference: index 0 is the default and the head of the circular
-    # fallback chain, so it degrades newest -> cheapest.
+    # Ordered by preference within each role: the first entry of a role is the
+    # head of that role's circular fallback chain. Index 0 must be an agent model
+    # (it is the last-resort default in LLMService).
     #
-    # `model` is passed straight to `init_chat_model`, so an entry for another
-    # provider only needs a "provider:model" string here, e.g.
-    # {"name": "claude-opus", "model": "anthropic:claude-opus-4-6", "kwargs": {...}}.
+    # `reasoning` is deliberately not set: in ChatOpenAI it switches to OpenAI's
+    # Responses API, which Gemini's OpenAI-compatible endpoint does not implement.
     LLM_CONFIGS: List[Dict[str, Any]] = [
+        # Main agent chain: separate per-model free-tier quotas, so each hop buys fresh capacity.
         {
-            "name": "gpt-5.6-luna",
-            "model": "gpt-5.6-luna",
-            "kwargs": {
-                "max_completion_tokens": settings.MAX_TOKENS,
-                "reasoning": {"effort": "medium"},
-            },
+            "name": "gemini-3.5-flash-lite",
+            "model": "gemini-3.5-flash-lite",
+            "provider": "gemini",
+            "role": ROLE_AGENT,
+            "kwargs": {"max_completion_tokens": settings.MAX_TOKENS},
         },
         {
-            "name": "gpt-5.4",
-            "model": "gpt-5.4",
-            "kwargs": {
-                "max_completion_tokens": settings.MAX_TOKENS,
-                "reasoning": {"effort": "medium"},
-            },
+            "name": "gemini-3.1-flash-lite",
+            "model": "gemini-3.1-flash-lite",
+            "provider": "gemini",
+            "role": ROLE_AGENT,
+            "kwargs": {"max_completion_tokens": settings.MAX_TOKENS},
         },
         {
-            "name": "gpt-5.4-mini",
-            "model": "gpt-5.4-mini",
-            "kwargs": {
-                "max_completion_tokens": settings.MAX_TOKENS,
-                "reasoning": {"effort": "low"},
-            },
+            "name": "gemini-3.8-flash",
+            "model": "gemini-3.8-flash",
+            "provider": "gemini",
+            "role": ROLE_AGENT,
+            "kwargs": {"max_completion_tokens": settings.MAX_TOKENS},
         },
+        # Side calls (session titles, later guardrails / routing): high RPD, low TPM.
         {
-            "name": "gpt-5.4-nano",
-            "model": "gpt-5.4-nano",
-            "kwargs": {
-                "max_completion_tokens": settings.MAX_TOKENS,
-                "reasoning": {"effort": "low"},
-            },
+            "name": "gemma-4-31b-it",
+            "model": "gemma-4-31b-it",
+            "provider": "gemini",
+            "role": ROLE_CLASSIFIER,
+            "kwargs": {"max_completion_tokens": 512},
         },
     ]
 
-    LLMS: List[Dict[str, Any]] = [
-        {"name": config["name"], "llm": _build_llm(config["model"], **config.get("kwargs", {}))}
-        for config in LLM_CONFIGS
-    ]
+    LLMS: List[Dict[str, Any]] = [{"name": config["name"], "llm": _build_llm(config)} for config in LLM_CONFIGS]
 
     @classmethod
     def get(cls, model_name: str, **kwargs) -> BaseChatModel:
@@ -127,21 +119,13 @@ class LLMRegistry:
             raise ValueError(f"model '{model_name}' not found in registry. available models: {available}")
 
         if kwargs:
-            # Take the model id from the config rather than reusing the registry
-            # name, so a name that ever diverges from its model can't send an
-            # unknown id to the API.
             logger.debug(
                 "creating_llm_with_custom_args",
                 model_name=model_name,
                 model=config["model"],
                 custom_args=list(kwargs.keys()),
             )
-            override_kwargs: Dict[str, Any] = dict(kwargs)
-            if _is_openai_model(config["model"]):
-                # ponytail: carries the token limit but not per-entry `reasoning`;
-                # add that here if a caller ever needs to override a reasoning model.
-                override_kwargs.setdefault("max_completion_tokens", settings.MAX_TOKENS)
-            return _build_llm(config["model"], **override_kwargs)
+            return _build_llm(config, **kwargs)
 
         logger.debug("using_default_llm_instance", model_name=model_name)
         return next(entry["llm"] for entry in cls.LLMS if entry["name"] == model_name)
@@ -156,15 +140,19 @@ class LLMRegistry:
         return [config["name"] for config in cls.LLM_CONFIGS]
 
     @classmethod
-    def get_model_at_index(cls, index: int) -> Dict[str, Any]:
-        """Return the model entry at a specific index, wrapping to 0 if out of range.
+    def get_fallback_chain(cls, index: int) -> List[int]:
+        """Return the fallback order for the model at ``index``.
+
+        Only models with the same role are included, rotated so ``index`` comes
+        first, e.g. agent models [0, 1, 2] starting at 1 -> [1, 2, 0].
 
         Args:
-            index: Index into LLMS.
+            index: Registry index of the model to start from.
 
         Returns:
-            Model entry dict.
+            Registry indices to try, in order.
         """
-        if 0 <= index < len(cls.LLMS):
-            return cls.LLMS[index]
-        return cls.LLMS[0]
+        role = cls.LLM_CONFIGS[index]["role"]
+        same_role = [i for i, config in enumerate(cls.LLM_CONFIGS) if config["role"] == role]
+        position = same_role.index(index)
+        return same_role[position:] + same_role[:position]

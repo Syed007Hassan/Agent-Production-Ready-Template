@@ -217,33 +217,26 @@ class LLMService:
             )
             raise
 
-    def _switch_to_next_model(self) -> bool:
-        """Advance the default model to the next entry in the registry (circular).
+    def _switch_to_model(self, index: int) -> None:
+        """Make the registry entry at ``index`` the default model.
 
-        Mutates ``self._llm`` and ``self._current_model_index`` so tool bindings
-        survive model switches on the default agent path.
+        Mutates ``self._llm`` and ``self._current_model_index`` and rebinds tools,
+        so tool bindings survive model switches on the default agent path.
 
-        Returns:
-            ``True`` on success, ``False`` if the switch failed.
+        Args:
+            index: Registry index of the model to switch to.
         """
-        try:
-            next_index = (self._current_model_index + 1) % len(LLMRegistry.LLMS)
-            next_entry = LLMRegistry.get_model_at_index(next_index)
-            logger.warning(
-                "switching_to_next_model",
-                from_index=self._current_model_index,
-                to_index=next_index,
-                to_model=next_entry["name"],
-            )
-            self._current_model_index = next_index
-            self._llm = next_entry["llm"]
-            if self._bound_tools:
-                self._llm = self._llm.bind_tools(self._bound_tools)
-            logger.info("model_switched", new_model=next_entry["name"], new_index=next_index)
-            return True
-        except Exception as e:
-            logger.error("model_switch_failed", error=str(e))
-            return False
+        next_entry = LLMRegistry.LLMS[index]
+        logger.warning(
+            "switching_to_next_model",
+            from_model=LLMRegistry.LLMS[self._current_model_index]["name"],
+            to_model=next_entry["name"],
+        )
+        self._current_model_index = index
+        self._llm = next_entry["llm"]
+        if self._bound_tools:
+            self._llm = self._llm.bind_tools(self._bound_tools)
+        logger.info("model_switched", new_model=next_entry["name"], new_index=index)
 
     async def _call_with_fallback(
         self,
@@ -252,26 +245,25 @@ class LLMService:
         response_format: Optional[Type[BaseModel]],
         model_kwargs: dict,
     ) -> Union[BaseMessage, BaseModel]:
-        """Build path-specific strategies and delegate to the shared fallback loop.
+        """Build the path-specific target resolver and delegate to the shared fallback loop.
 
         One-off path (any override set):
-            ``get_target`` builds a fresh registry instance each attempt.
-            ``advance`` increments a local index — ``self._llm`` is never touched.
+            ``get_target`` builds a fresh registry instance per attempt;
+            ``self._llm`` is never touched.
 
         Default path (no overrides):
-            ``get_target`` returns ``self._llm`` (tool-bound).
-            ``advance`` calls ``_switch_to_next_model`` so bindings persist.
+            ``get_target`` switches ``self._llm`` (tool-bound) when the loop
+            moves on, so bindings persist.
         """
 
         def _override_target(idx: int) -> Any:
             base = LLMRegistry.get(LLMRegistry.LLMS[idx]["name"], **model_kwargs)
             return base.with_structured_output(response_format) if response_format else base
 
-        def _default_target(_: int) -> Any:
+        def _default_target(idx: int) -> Any:
+            if idx != self._current_model_index:
+                self._switch_to_model(idx)
             return self._llm
-
-        def _default_advance(_: int) -> Optional[int]:
-            return self._current_model_index if self._switch_to_next_model() else None
 
         if model_name or response_format or model_kwargs:
             all_names = LLMRegistry.get_all_names()
@@ -282,82 +274,56 @@ class LLMService:
                 )
 
             start = all_names.index(model_name) if model_name else self._current_model_index
-            total = len(LLMRegistry.LLMS)
-            get_target: Callable[[int], Any] = _override_target
+            return await self._fallback_loop(messages, start, _override_target)
 
-            def _override_advance(idx: int) -> Optional[int]:
-                return (idx + 1) % total
-
-            advance: Callable[[int], Optional[int]] = _override_advance
-        else:
-            start = self._current_model_index
-            get_target = _default_target
-            advance = _default_advance
-
-        return await self._fallback_loop(messages, start, get_target, advance)
+        return await self._fallback_loop(messages, self._current_model_index, _default_target)
 
     async def _fallback_loop(
         self,
         messages: LanguageModelInput,
         start: int,
         get_target: Callable[[int], Any],
-        advance: Callable[[int], Optional[int]],
     ) -> Any:
-        """Shared fallback loop — try each model in turn until one succeeds.
+        """Shared fallback loop — try each same-role model in turn until one succeeds.
 
         Args:
             messages: Messages to send.
             start: Registry index to begin from.
             get_target: Returns the ``Runnable`` to invoke for a given index.
-            advance: Returns the next index to try, or ``None`` to stop.
 
         Returns:
             The first successful response.
 
         Raises:
-            RuntimeError: When all models have been exhausted.
+            RuntimeError: When every model in the chain has failed.
         """
-        total = len(LLMRegistry.LLMS)
-        current = start
-        models_tried = 0
+        chain = LLMRegistry.get_fallback_chain(start)
         last_error: Optional[Exception] = None
 
-        for models_tried in range(1, total + 1):
+        for models_tried, current in enumerate(chain, start=1):
             current_name = LLMRegistry.LLMS[current]["name"]
             try:
                 return await self._invoke_with_retry(get_target(current), messages)
             except (TypeError, AttributeError, KeyError):
                 # Programming errors would fail identically on every model, so
-                # re-raise immediately rather than cycling through the registry
+                # re-raise immediately rather than cycling through the chain
                 # and leaving the service switched to a fallback model.
                 raise
             except Exception as e:
-                # Broad on purpose: a registry entry can be any provider, and
-                # each has its own exception hierarchy, so this can't be
-                # narrowed to e.g. OpenAIError without breaking fallback for
-                # non-OpenAI models. ValueError from an invalid model_name is
-                # raised earlier in `_call_with_fallback`, before this loop.
+                # Broad on purpose: whatever the provider raised, the next model
+                # in the chain may still succeed.
                 last_error = e
                 logger.error(
                     "llm_call_failed_after_retries",
                     model=current_name,
                     models_tried=models_tried,
-                    total_models=total,
+                    total_models=len(chain),
                     error=str(e),
                 )
-                if models_tried >= total:
-                    logger.error(
-                        "all_models_failed", models_tried=models_tried, starting_model=LLMRegistry.LLMS[start]["name"]
-                    )
-                    break
-                next_idx = advance(current)
-                if next_idx is None:
-                    logger.error("failed_to_switch_to_next_model")
-                    break
-                current = next_idx
 
+        logger.error("all_models_failed", models_tried=len(chain), starting_model=LLMRegistry.LLMS[start]["name"])
         raise RuntimeError(
-            f"failed to get response from llm after trying {models_tried} models. last error: {str(last_error)}"
+            f"failed to get response from llm after trying {len(chain)} models. last error: {str(last_error)}"
         )
 
 
