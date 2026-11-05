@@ -242,6 +242,8 @@ class Settings:
         self.EVALUATION_API_KEY = os.getenv("EVALUATION_API_KEY", self.GEMINI_API_KEY)
         # Judge calls per minute; kept under the free-tier 15 RPM so a run never trips the per-minute limit.
         self.EVALUATION_MAX_RPM = int(os.getenv("EVALUATION_MAX_RPM", "12"))
+        # Runs per eval; each costs one judge call per metric, from the same daily quota as the agent model.
+        self.EVALUATION_MAX_TRACES = int(os.getenv("EVALUATION_MAX_TRACES", "20"))
 
         # Apply environment-specific settings
         self.apply_environment_settings()

@@ -79,12 +79,16 @@ EVALUATION_LLM=gemini-3.5-flash-lite   # default
 EVALUATION_BASE_URL=...                # defaults to GEMINI_BASE_URL
 EVALUATION_API_KEY=...                 # defaults to GEMINI_API_KEY
 EVALUATION_MAX_RPM=12                  # judge calls per minute
+EVALUATION_MAX_TRACES=20               # runs per eval (each costs one call per metric)
 ```
 
 ### Free-tier behaviour
 
 - **Throttled:** judge calls are spaced to `EVALUATION_MAX_RPM` (default 12, under the free tier's 15 RPM). Each trace costs one call per metric.
 - **Per-minute 429:** waits Google's `retryDelay`, then retries the same judge (tenacity, 3 attempts). 5xx and timeouts back off exponentially.
-- **Daily 429:** the run **stops** instead of switching models. The report has `stopped_early: true` and `traces_remaining`. Scores are pushed only after every metric for a trace succeeds, so unscored traces are picked up by the next run — rerun after the daily reset (midnight Pacific).
-- Only traces from the **last 24 hours** are fetched, so resume within a day.
+- **Daily 429:** the run **stops** instead of switching models. The report has `stopped_early: true` and `traces_remaining`. Rerun after the daily reset (midnight Pacific).
+- **All-or-nothing per trace:** scores are pushed only when every metric for a trace succeeds, so a trace hit by the daily cap or a persistent 5xx stays unscored and the next run retries it (re-spending those judge calls).
+- Only traces from the **last 24 hours** are fetched, newest first, so resume within a day.
+- **Langfuse failures stop the run.** Traces are read through v2 observations and v3 scores (`evals/traces.py`), because the legacy endpoints return 410 for organizations created after 2026-09-16. An API error exits non-zero rather than reporting success on zero traces.
+- Scores become readable a short time after they're sent, so a rerun straight after a run could re-score a few traces.
 - The judge's calls share the daily quota of `EVALUATION_LLM` with the app when they're the same model.

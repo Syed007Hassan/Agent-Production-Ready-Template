@@ -43,6 +43,9 @@ class StubLangfuse:
     def create_score(self, **kwargs: Any) -> None:
         self.scores.append(kwargs)
 
+    def flush(self) -> None:
+        self.flushed = True
+
 
 def make_trace(trace_id: str) -> SimpleNamespace:
     messages = [{"type": "human", "content": "hi"}, {"type": "ai", "content": "hello"}]
@@ -55,7 +58,11 @@ def make_evaluator(monkeypatch: pytest.MonkeyPatch, judge: StubJudge, trace_coun
     evaluator.client = SimpleNamespace(beta=SimpleNamespace(chat=SimpleNamespace(completions=judge)))  # pyright: ignore[reportAttributeAccessIssue]
     evaluator.langfuse = StubLangfuse()  # pyright: ignore[reportAttributeAccessIssue]
     traces = [make_trace(f"trace-{i}") for i in range(trace_count)]
-    monkeypatch.setattr(evaluator, "_Evaluator__fetch_traces", lambda: traces)
+
+    async def fetch() -> list:
+        return traces
+
+    monkeypatch.setattr(evaluator, "_fetch_traces", fetch)
     return evaluator
 
 
@@ -95,7 +102,7 @@ def test_minute_quota_waits_and_retries_same_judge(monkeypatch):
     assert judge.calls == len(metrics) + 1
 
 
-def test_persistent_server_error_fails_metric_but_run_continues(monkeypatch):
+def test_trace_with_a_failed_metric_pushes_nothing_so_the_next_run_retries_it(monkeypatch):
     judge = StubJudge([server_500(), server_500(), server_500()])
     monkeypatch.setattr("evals.evaluator._backoff", lambda _: 0)
     evaluator = make_evaluator(monkeypatch, judge, trace_count=1)
@@ -103,7 +110,29 @@ def test_persistent_server_error_fails_metric_but_run_continues(monkeypatch):
     report = run(evaluator)
     assert report["failed_traces"] == 1
     assert not report["stopped_early"]
-    assert len(evaluator.langfuse.scores) == len(metrics) - 1  # pyright: ignore[reportAttributeAccessIssue]
+    assert evaluator.langfuse.scores == []  # pyright: ignore[reportAttributeAccessIssue]
+
+
+def test_scores_are_flushed_before_the_run_ends(monkeypatch):
+    evaluator = make_evaluator(monkeypatch, StubJudge([]), trace_count=1)
+    run(evaluator)
+    assert evaluator.langfuse.flushed  # pyright: ignore[reportAttributeAccessIssue]
+
+
+def test_trace_with_no_text_output_spends_no_judge_calls(monkeypatch):
+    judge = StubJudge([])
+    evaluator = make_evaluator(monkeypatch, judge, trace_count=1)
+    trace = SimpleNamespace(
+        id="t", output={"messages": [{"type": "human", "content": "hi"}, {"type": "ai", "content": ""}]}
+    )
+
+    async def fetch() -> list:
+        return [trace]
+
+    monkeypatch.setattr(evaluator, "_fetch_traces", fetch)
+    report = run(evaluator)
+    assert judge.calls == 0
+    assert report["failed_traces"] == 1
 
 
 def test_throttle_spaces_calls_under_the_rpm_limit(monkeypatch):

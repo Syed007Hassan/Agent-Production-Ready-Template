@@ -5,14 +5,10 @@ import logging
 import os
 import sys
 import time
-from datetime import (
-    datetime,
-    timedelta,
-)
 
+import httpx
 import openai
 from langfuse import Langfuse
-from langfuse.api.resources.commons.types.trace_with_details import TraceWithDetails
 from tenacity import (
     RetryCallState,
     before_sleep_log,
@@ -44,6 +40,10 @@ from evals.helpers import (
 )
 from evals.metrics import metrics
 from evals.schemas import ScoreSchema
+from evals.traces import (
+    EvalTrace,
+    fetch_unscored_traces,
+)
 
 # Worth retrying on the same judge model; everything else is reported as a failed metric.
 _RETRYABLE_KINDS = {FailureKind.MINUTE_QUOTA, FailureKind.SERVER_ERROR, FailureKind.TIMEOUT}
@@ -112,7 +112,7 @@ class Evaluator:
             generate_report_file: Whether to generate a JSON report after evaluation. Defaults to True.
         """
         start_time = time.time()
-        traces = self.__fetch_traces()
+        traces = await self._fetch_traces()
         trace_results = {}
 
         for trace in tqdm(traces, desc="Evaluating traces"):
@@ -128,8 +128,9 @@ class Evaluator:
                 )
                 break
 
-            # Record and push only once every metric has run, so a run cut short never
-            # leaves a half-scored trace (scored traces are skipped by the next run's fetch).
+            # Push only when every metric scored: a trace with any score counts as done for the
+            # next run's fetch, so a partial push would leave its failed metrics unscored forever.
+            all_scored = all(scores.values())
             self.report["total_traces"] += 1
             trace_results[trace.id] = {
                 "success": False,
@@ -140,12 +141,15 @@ class Evaluator:
             for metric in metrics:
                 score = scores[metric["name"]]
                 if score:
-                    self._push_to_langfuse(trace, score, metric)
+                    if all_scored:
+                        self._push_to_langfuse(trace, score, metric)
                     update_success_metrics(self.report, trace.id, metric["name"], score, trace_results)
                 else:
                     update_failure_metrics(self.report, trace.id, metric["name"], trace_results)
             process_trace_results(self.report, trace.id, trace_results, len(metrics))
 
+        # The SDK batches scores in the background; a short-lived CLI run must send them before exiting.
+        self.langfuse.flush()
         self.report["traces_remaining"] = len(traces) - self.report["total_traces"]
         self.report["duration_seconds"] = round(time.time() - start_time, 2)
         calculate_avg_scores(self.report)
@@ -162,19 +166,32 @@ class Evaluator:
             duration_seconds=self.report["duration_seconds"],
         )
 
-    async def _evaluate_trace(self, trace: TraceWithDetails) -> dict[str, ScoreSchema | None]:
+    async def _fetch_traces(self) -> list[EvalTrace]:
+        """Fetch unscored runs; a Langfuse failure propagates so the run fails visibly."""
+        async with httpx.AsyncClient(
+            base_url=settings.LANGFUSE_HOST,
+            auth=(settings.LANGFUSE_PUBLIC_KEY, settings.LANGFUSE_SECRET_KEY),
+            timeout=60,
+        ) as client:
+            return await fetch_unscored_traces(
+                client,
+                metric_names={metric["name"] for metric in metrics},
+                max_traces=settings.EVALUATION_MAX_TRACES,
+            )
+
+    async def _evaluate_trace(self, trace: EvalTrace) -> dict[str, ScoreSchema | None]:
         """Run every metric on one trace.
 
         Raises:
             EvalQuotaExhaustedError: Propagated so the run stops before recording this trace.
         """
         input, output = get_input_output(trace)
-        if input is None or output is None:
+        if not input or not output:
             logger.error("metric_evaluation_failed_missing_io", trace_id=trace.id)
             return {metric["name"]: None for metric in metrics}
         return {metric["name"]: await self._run_metric_evaluation(metric, input, output) for metric in metrics}
 
-    def _push_to_langfuse(self, trace: TraceWithDetails, score: ScoreSchema, metric: dict):
+    def _push_to_langfuse(self, trace: EvalTrace, score: ScoreSchema, metric: dict):
         """Push evaluation score to Langfuse.
 
         Args:
@@ -262,21 +279,3 @@ class Evaluator:
             response_format=ScoreSchema,
         )
         return response.choices[0].message.parsed
-
-    def __fetch_traces(self) -> list[TraceWithDetails]:
-        """Fetch traces from the past 24 hours without scores.
-
-        Returns:
-            List of traces that haven't been scored yet.
-        """
-        last_24_hours = datetime.now() - timedelta(hours=24)
-        logger.info("fetching_langfuse_traces", from_timestamp=str(last_24_hours))
-        try:
-            traces = self.langfuse.api.trace.list(
-                from_timestamp=last_24_hours, order_by="timestamp.asc", limit=100
-            ).data
-            traces_without_scores = [trace for trace in traces if not trace.scores]
-            return traces_without_scores
-        except Exception:
-            logger.exception("langfuse_traces_fetch_failed")
-            return []

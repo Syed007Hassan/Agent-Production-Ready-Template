@@ -11,10 +11,9 @@ from typing import (
     Tuple,
 )
 
-from langfuse.api.resources.commons.types.trace_with_details import TraceWithDetails
-
 from app.core.logging import logger
 from evals.schemas import ScoreSchema
+from evals.traces import EvalTrace
 
 
 def format_messages(messages: list[dict]) -> str:
@@ -47,17 +46,15 @@ def format_messages(messages: list[dict]) -> str:
     return "\n".join(formatted_messages)
 
 
-def get_input_output(trace: TraceWithDetails) -> Tuple[Optional[str], Optional[str]]:
+def get_input_output(trace: EvalTrace) -> Tuple[Optional[str], Optional[str]]:
     """Extract and format input and output messages from a trace.
 
     Args:
         trace: The trace to extract messages from.
 
     Returns:
-        Tuple of (formatted_input, formatted_output). None if output is not a dict.
+        Tuple of (formatted_input, formatted_output).
     """
-    if not isinstance(trace.output, dict):
-        return None, None
     input_messages = trace.output.get("messages", [])[:-1]
     output_message = trace.output.get("messages", [])[-1]
     return format_messages(input_messages), format_messages([output_message])
