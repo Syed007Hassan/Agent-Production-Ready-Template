@@ -8,8 +8,6 @@ A production-ready template for building AI agent backends with FastAPI and Lang
 
 ## Runs on the Gemini API free tier
 
-> Fork of [wassim249/fastapi-langgraph-agent-production-ready-template](https://github.com/wassim249/fastapi-langgraph-agent-production-ready-template) (MIT), reworked to run entirely on the **Gemini API free tier** — no paid LLM provider.
-
 Every model is reached through Gemini's [OpenAI-compatible endpoint](https://ai.google.dev/gemini-api/docs/openai), so the stack keeps using LangChain's `ChatOpenAI` and the OpenAI SDK's error types. Free-tier quotas are **per model**, so the agent falls back across models with separate quotas:
 
 ```
