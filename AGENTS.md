@@ -27,18 +27,22 @@ make stack-up ENV=development  # Full stack: API + DB + Prometheus + Grafana
 app/
   api/v1/          # Route handlers (auth.py, chatbot.py, api.py)
   core/
+    cache.py       # Caching helpers
     config.py      # Pydantic Settings config
-    database.py    # Async DB setup
     langgraph/     # LangGraph agent graph + tools
     logging.py     # structlog setup
-    llm.py         # LLM service with retry logic
     limiter.py     # Rate limiting (slowapi)
     metrics.py     # Prometheus metrics
     middleware.py  # ASGI middleware
+    observability.py  # Tracing setup
     prompts/       # System prompts
   models/          # SQLModel ORM models
   schemas/         # Pydantic request/response schemas + graph state
-  services/        # Business logic services
+  services/
+    database.py    # Async DB setup
+    llm/           # Model registry, fallback service, quota tracking, Gemini client
+    memory.py      # mem0 long-term memory
+    session_naming.py  # Background session titles
   utils/           # Shared utilities
 evals/             # LLM evaluation framework (Langfuse-based)
 scripts/           # Environment setup, Docker build scripts
@@ -53,6 +57,19 @@ This is a production-ready AI agent application built with:
 - **PostgreSQL + pgvector** for long-term memory storage (mem0ai)
 - **JWT authentication** with session management
 - **Prometheus + Grafana** for monitoring
+- **Gemini API free tier** as the only LLM provider
+
+## LLM Provider: Gemini Free Tier Only
+
+- Use only the Gemini API, through its OpenAI-compatible endpoint. Do not add another provider or anything that needs a billing account
+- Register chat models in `LLM_CONFIGS` in `app/services/llm/registry.py`, and check model IDs against Google's docs rather than guessing
+- Build chat models through `LLMRegistry`. It uses `GeminiChatOpenAI`, which returns the `thought_signature` that Gemini 3 requires on tool calls; plain `ChatOpenAI` gets a 400
+- Keep SDK retries off (`max_retries=0`). `LLMService` owns retry and fallback, and has to see every 429 to tell minute quotas from daily ones
+- Fallback stays within a role: agent models never fall back to the classifier model, or the reverse
+- The eval judge is one fixed model and never falls back, because switching judges makes scores incomparable. On a daily 429 the run stops
+- Do not pass `reasoning` to `ChatOpenAI`. It routes to the Responses API, which Gemini does not implement
+- Set a timeout and a token limit on every LLM call, and a max iteration limit on agent loops
+- Treat the free tier as non-confidential: practice data only
 
 ## Quick Reference: Critical Rules
 
@@ -64,11 +81,13 @@ This is a production-ready AI agent application built with:
 - Log messages must be **lowercase_with_underscores** (e.g., `"user_login_successful"`)
 - **NO f-strings in structlog events** - pass variables as kwargs
 - Use `logger.exception()` instead of `logger.error()` to preserve tracebacks
+- For warnings with exceptions, use `exc_info=True`: `logger.warning("event_name", exc_info=True)`
 - Example: `logger.info("chat_request_received", session_id=session.id, message_count=len(messages))`
 
 ### Retry Rules
 - **Always use tenacity library** for retry logic
-- Configure with exponential backoff
+- Configure with exponential backoff and a stop condition (max attempts or max time)
+- Log retry attempts for observability
 - Example: `@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))`
 
 ### Output Rules
@@ -78,11 +97,16 @@ This is a production-ready AI agent application built with:
 ### Caching Rules
 - **Only cache successful responses**, never cache errors
 - Use appropriate cache TTL based on data volatility
+- Document cache keys, expiration, and invalidation
 
 ### FastAPI Rules
-- All routes must have rate limiting decorators
+- All routes must have rate limiting decorators: `@limiter.limit(settings.RATE_LIMIT_ENDPOINTS["endpoint_name"][0])`
 - Use dependency injection for services, database connections, and auth
 - All database operations must be async
+- Use lifespan context managers for startup/shutdown, not `@app.on_event`
+- Use middleware for logging context, metrics, and unexpected errors
+- Configure CORS through settings
+- Structure routes in versioned API modules (e.g., `app/api/v1/`)
 
 ## Code Style Conventions
 
@@ -93,6 +117,8 @@ This is a production-ready AI agent application built with:
 - Use functional, declarative programming; avoid classes except for services and agents
 - File naming: lowercase with underscores (e.g., `user_routes.py`)
 - Use the RORO pattern (Receive an Object, Return an Object)
+- Use descriptive variable names with auxiliary verbs (e.g., `is_active`, `has_permission`)
+- Avoid unnecessary `else`; use the if-return pattern
 
 ### Error Handling
 - Handle errors at the beginning of functions
