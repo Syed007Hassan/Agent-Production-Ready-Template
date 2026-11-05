@@ -62,6 +62,8 @@ async def _persist_session_name(session_id: str, user_message: str) -> None:
             response_format=SessionTitle,
             # Headroom: Gemma spends hidden thinking tokens, so a tight limit can cut off the JSON.
             max_completion_tokens=256,
+            # Runs in the background, so it can outlast the per-call limit: Gemma can take ~30s.
+            timeout=settings.LLM_TOTAL_TIMEOUT - 5,
             temperature=0.3,
         )
         await database_service.update_session_name(session_id, result.title)

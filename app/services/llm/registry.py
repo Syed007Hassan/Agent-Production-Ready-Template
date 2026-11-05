@@ -6,19 +6,21 @@ from typing import (
     List,
 )
 
-from langchain.chat_models import init_chat_model
 from langchain_core.language_models.chat_models import BaseChatModel
 from pydantic import SecretStr
 
 from app.core.config import settings
 from app.core.logging import logger
+from app.services.llm.gemini_chat import GeminiChatOpenAI
 
 # Every provider is reached through its OpenAI-compatible endpoint, so all
-# models share one client (ChatOpenAI) and one error hierarchy — the retry and
-# fallback logic in LLMService matches on `openai.RateLimitError` etc.
-# Adding a provider means one entry here plus its key in config, no code changes.
+# models share one client family (ChatOpenAI) and one error hierarchy — the retry
+# and fallback logic in LLMService matches on `openai.RateLimitError` etc.
+# Adding a provider means one entry here plus its key in config. `chat_model` is
+# ChatOpenAI unless the endpoint needs more, as Gemini's thought signatures do.
 PROVIDERS: Dict[str, Dict[str, Any]] = {
     "gemini": {
+        "chat_model": GeminiChatOpenAI,
         "base_url": settings.GEMINI_BASE_URL,
         "api_key": SecretStr(settings.GEMINI_API_KEY),
     },
@@ -47,8 +49,8 @@ def _build_llm(config: Dict[str, Any], **overrides: Any) -> BaseChatModel:
         **config.get("kwargs", {}),
         **overrides,
     }
-    return init_chat_model(
-        f"openai:{config['model']}",
+    return provider["chat_model"](
+        model=config["model"],
         base_url=provider["base_url"],
         api_key=provider["api_key"],
         **kwargs,

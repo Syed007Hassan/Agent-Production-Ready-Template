@@ -66,6 +66,16 @@ from app.utils.tasks import create_background_task
 PostgresConnPool = AsyncConnectionPool[AsyncConnection[DictRow]]
 
 
+def _should_resume(state: StateSnapshot) -> bool:
+    """Return whether the next user message continues a paused run instead of starting a turn.
+
+    A pending ``chat`` node only means the last LLM call failed, not that the graph asked the
+    user anything: resuming would discard the new message and answer the old one. Human-in-the-loop
+    interrupts are raised from tools, so those always leave ``tool_call`` pending.
+    """
+    return bool(state.next) and state.next != ("chat",)
+
+
 class LangGraphAgent:
     """Manages the LangGraph Agent/workflow and interactions with the LLM.
 
@@ -311,7 +321,7 @@ class LangGraphAgent:
                 memory_service.search(user_id, messages[-1].content),
             )
 
-            if state.next:
+            if _should_resume(state):
                 logger.info("resuming_interrupted_graph", session_id=session_id, next_nodes=state.next)
                 response = await graph.ainvoke(
                     Command(resume=messages[-1].content),
@@ -381,7 +391,7 @@ class LangGraphAgent:
                 memory_service.search(user_id, messages[-1].content),
             )
 
-            if state.next:
+            if _should_resume(state):
                 logger.info("resuming_interrupted_graph_stream", session_id=session_id, next_nodes=state.next)
                 graph_input = Command(resume=messages[-1].content)
             else:

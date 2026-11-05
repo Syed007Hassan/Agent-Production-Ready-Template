@@ -4,15 +4,16 @@
 
 The LLM service (`app/services/llm/`) handles all language model calls with quota-aware fallback, retries for transient errors, and a total timeout budget. Agent code calls `llm_service.call(messages)` — the service handles everything else.
 
-The package is split into three modules:
+The package is split into four modules:
 
 - `app/services/llm/registry.py` — `LLMRegistry`: providers, models, and their roles
 - `app/services/llm/availability.py` — error classification and per-model quota tracking
 - `app/services/llm/service.py` — `LLMService`: call logic, retries, fallback, structured output
+- `app/services/llm/gemini_chat.py` — `GeminiChatOpenAI`: `ChatOpenAI` plus Gemini's thought signatures
 
 ## Providers
 
-Every provider is reached through its **OpenAI-compatible endpoint**, so all models share one client (`ChatOpenAI`) and one error hierarchy (`openai.RateLimitError`, …). A provider is just a `base_url` plus a key:
+Every provider is reached through its **OpenAI-compatible endpoint**, so all models share one client family (`ChatOpenAI`) and one error hierarchy (`openai.RateLimitError`, …). A provider is just a `base_url` plus a key:
 
 ```python
 # app/services/llm/registry.py
@@ -42,6 +43,7 @@ Set `DEFAULT_LLM_MODEL` to choose the agent's starting model, and `SESSION_NAMIN
 
 **Notes from testing**
 
+- Gemini 3 models return a `thought_signature` on each tool call and reject the next request with a 400 if it isn't sent back. `ChatOpenAI` drops the field, so `GeminiChatOpenAI` (`app/services/llm/gemini_chat.py`) stores it in `additional_kwargs` and restores it in the request. Disabling thinking doesn't remove this requirement. A signature issued by one model is accepted by another, so fallback mid-tool-loop works. Threads with no signature get Google's `skip_thought_signature_validator` value.
 - `reasoning` is not set on any entry: in `ChatOpenAI` it switches to OpenAI's Responses API, which Gemini's endpoint does not implement.
 - Gemma's thinking cannot be disabled (`reasoning_effort` returns a 400). It spends hidden thinking tokens, can take 3–30 s, and in plain JSON mode leaks a `<thought>` block into the reply. Strict structured output (`response_format=Schema`) comes back clean, which is why session titles work on it.
 
